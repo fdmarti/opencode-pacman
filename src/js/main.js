@@ -10,14 +10,14 @@ let game = createGame();
 let frame = 0;
 
 const KEY_DIR = {
-  ArrowLeft: 'left',
-  ArrowRight: 'right',
-  ArrowUp: 'up',
-  ArrowDown: 'down',
+  a: 'left',
+  d: 'right',
+  w: 'up',
+  s: 'down',
 };
 
 document.addEventListener( 'keydown', ( e ) => {
-  const dir = KEY_DIR[ e.key ];
+  const dir = KEY_DIR[ e.key.toLowerCase() ];
   if ( !dir ) return;
   e.preventDefault();
   if ( game.state === 'playing' ) game.pacman.nextDir = dir;
