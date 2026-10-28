@@ -13,6 +13,9 @@ const OPPOSITE = { left: 'right', right: 'left', up: 'down', down: 'up' };
 const PACMAN_SPEED = 0.125; // 1/8 celda/frame -> alinea cada 8 frames
 const GHOST_SPEED = 0.1;    // 1/10 celda/frame
 
+const POWER_DURATION = 15;               // segundos del efecto de un power pellet
+const GHOST_POINTS = [ 200, 400, 800, 1600 ]; // por fantasma comido en el mismo efecto
+
 // Puerta de la pen (fila 12, cols 13-14 del laberinto). Columna fija de salida.
 const PEN_DOOR_X = 13;
 const PEN_DOOR_Y = 12;
@@ -25,14 +28,17 @@ function createGame() {
   grid[ PACMAN_START.y ][ PACMAN_START.x ] = 0;
 
   let dots = 0;
-  for ( const row of grid ) for ( const v of row ) if ( v === 2 ) dots++;
+  // Cuenta dots (2) y power pellets (4): ganar el nivel exige comerlos todos.
+  for ( const row of grid ) for ( const v of row ) if ( v === 2 || v === 4 ) dots++;
 
   return {
     state: 'start',
     score: 0,
     lives: 3,
     dotsRemaining: dots,
-    playTime: 0, // segundos de juego (se cuentan desde que state === 'playing')
+    playTime: 0,  // segundos de juego (se cuentan desde que state === 'playing')
+    powerTimer: 0, // segundos restantes del efecto; 0 = sin efecto
+    ghostCombo: 0, // fantasmas comidos dentro del efecto actual
     grid,
     pacman: {
       x: PACMAN_START.x,
@@ -47,7 +53,8 @@ function createGame() {
       dir: 'up',
       speed: GHOST_SPEED,
       kind: g.kind,
-      releaseDelay: g.releaseDelay,
+      releaseDelay: g.releaseDelay, // demora original (segundos)
+      releaseAt: g.releaseDelay,    // playTime en el que pasa de 'waiting' a 'leaving'
       mode: 'waiting', // 'waiting' | 'leaving' | 'active'
     } ) ),
   };
@@ -106,6 +113,16 @@ function movePacman( game ) {
       grid[ p.y ][ p.x ] = 0;
       game.score += 10;
       game.dotsRemaining--;
+      playSound( 'dot' );
+    }
+    // Comer power pellet: +50 y activa el efecto (fresco, no hay efecto previo).
+    if ( grid[ p.y ][ p.x ] === 4 ) {
+      grid[ p.y ][ p.x ] = 0;
+      game.score += 50;
+      game.dotsRemaining--;
+      game.powerTimer = POWER_DURATION;
+      game.ghostCombo = 0;
+      playSound( 'power' );
     }
     // Si no puede seguir, se detiene en la celda.
     if ( !canMove( grid, p.x, p.y, p.dir, 'pacman' ) ) return;
@@ -185,6 +202,13 @@ function decideGhost( game, g ) {
   // Sin salida (callejon): permitir el giro de 180.
   const choices = options.length ? options : [ '' + OPPOSITE[ g.dir ] ];
 
+  // Efecto de power pellet activo: en lugar de perseguir, direccion aleatoria
+  // entre las validas (mismas reglas de giro que la persecucion).
+  if ( game.powerTimer > 0 ) {
+    g.dir = choices[ Math.floor( Math.random() * choices.length ) ];
+    return;
+  }
+
   // Aplica la personalidad solo a fantasmas activos (moveGhost lo garantiza).
   const target = ghostTarget( game, g );
   if ( !target ) return; // kind sin personalidad: conserva la direccion actual
@@ -234,6 +258,9 @@ function resetPositions( game ) {
     g.y = GHOST_STARTS[ i ].y;
     g.dir = 'up';
     g.mode = 'waiting';
+    // La demora se cuenta desde el reinicio del reloj (releaseAt es un sello
+    // sobre playTime, no un contador acumulado).
+    g.releaseAt = g.releaseDelay;
   } );
 }
 
@@ -244,7 +271,7 @@ function collides( a, b ) {
 // Pasa a 'leaving' cada fantasma cuya demora ya se cumplio en el reloj de juego.
 function releaseGhosts( game ) {
   for ( const g of game.ghosts ) {
-    if ( g.mode === 'waiting' && game.playTime >= g.releaseDelay ) {
+    if ( g.mode === 'waiting' && game.playTime >= g.releaseAt ) {
       g.mode = 'leaving';
     }
   }
@@ -253,22 +280,47 @@ function releaseGhosts( game ) {
 function update( game ) {
   // Reloj de juego en segundos (60 fps nominal, como el resto del bucle).
   // Las demoras de salida de los fantasmas se miden contra este contador.
-  if ( game.state === 'playing' ) game.playTime += 1 / 60;
+  if ( game.state === 'playing' ) {
+    game.playTime += 1 / 60;
+    // El efecto de los power pellets se agota en el mismo reloj.
+    if ( game.powerTimer > 0 ) {
+      game.powerTimer -= 1 / 60;
+      if ( game.powerTimer < 0 ) game.powerTimer = 0;
+    }
+  }
   releaseGhosts( game );
 
   movePacman( game );
   game.ghosts.forEach( ( g ) => moveGhost( game, g ) );
 
   for ( const g of game.ghosts ) {
-    if ( collides( game.pacman, g ) ) {
-      game.lives--;
-      if ( game.lives <= 0 ) {
-        game.state = 'lost';
-        return;
-      }
-      resetPositions( game );
-      break;
+    if ( !collides( game.pacman, g ) ) continue;
+
+    // Con el efecto activo, un fantasma 'active' es comido (Pacman invencible);
+    // uno no active no hace nada. Fuera del efecto todo sigue costando una vida.
+    if ( game.powerTimer > 0 ) {
+      if ( g.mode !== 'active' ) continue;
+      game.score += GHOST_POINTS[ Math.min( game.ghostCombo, 3 ) ];
+      game.ghostCombo++;
+      playSound( 'ghost' );
+      // Vuelve a su celda de la pen y espera su demora original desde el retorno.
+      const start = GHOST_STARTS.find( ( s ) => s.kind === g.kind ) || GHOST_STARTS[ 0 ];
+      g.x = start.x;
+      g.y = start.y;
+      g.dir = 'up';
+      g.mode = 'waiting';
+      g.releaseAt = game.playTime + g.releaseDelay;
+      continue;
     }
+
+    game.lives--;
+    playSound( 'death' );
+    if ( game.lives <= 0 ) {
+      game.state = 'lost';
+      return;
+    }
+    resetPositions( game );
+    break;
   }
 
   if ( game.dotsRemaining <= 0 ) game.state = 'won';
