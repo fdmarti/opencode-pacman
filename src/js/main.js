@@ -17,7 +17,13 @@ const KEY_DIR = {
 };
 
 document.addEventListener( 'keydown', ( e ) => {
-  const dir = KEY_DIR[ e.key.toLowerCase() ];
+  const key = e.key.toLowerCase();
+  // Silenciar/activar sonidos; funciona tambien fuera de una partida.
+  if ( key === 'm' ) {
+    toggleMute();
+    return;
+  }
+  const dir = KEY_DIR[ key ];
   if ( !dir ) return;
   e.preventDefault();
   if ( game.state === 'playing' ) game.pacman.nextDir = dir;

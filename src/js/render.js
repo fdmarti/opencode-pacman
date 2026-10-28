@@ -70,10 +70,11 @@ function drawDots( ctx, grid ) {
   ctx.fillStyle = DOT_COLOR;
   for ( let y = 0; y < grid.length; y++ ) {
     for ( let x = 0; x < grid[ 0 ].length; x++ ) {
-      if ( grid[ y ][ x ] !== 2 ) continue;
+      // 2 = dot (radio 2.5), 4 = power pellet (radio 6, mas grande a proposito).
+      if ( grid[ y ][ x ] !== 2 && grid[ y ][ x ] !== 4 ) continue;
       const { cx, cy } = cellCenter( x, y );
       ctx.beginPath();
-      ctx.arc( cx, cy, 2.5, 0, Math.PI * 2 );
+      ctx.arc( cx, cy, grid[ y ][ x ] === 4 ? 6 : 2.5, 0, Math.PI * 2 );
       ctx.fill();
     }
   }
@@ -159,7 +160,15 @@ function draw( ctx, game, frame ) {
   drawDoor( ctx, grid );
   drawDots( ctx, grid );
   drawPacman( ctx, game.pacman, frame );
-  game.ghosts.forEach( ( g, i ) => drawGhost( ctx, g, GHOST_COLORS[ i ] || '#ff0000' ) );
+  game.ghosts.forEach( ( g, i ) => {
+    // Con efecto activo, solo los fantasmas 'active' parpadean cyan/blanco;
+    // el resto conserva su color normal.
+    const scared = game.powerTimer > 0 && g.mode === 'active';
+    const color = scared
+      ? ( Math.floor( frame / 15 ) % 2 === 0 ? '#00ffff' : '#ffffff' )
+      : ( GHOST_COLORS[ i ] || '#ff0000' );
+    drawGhost( ctx, g, color );
+  } );
   drawHUD( ctx, game, W );
 }
 
