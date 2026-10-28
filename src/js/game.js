@@ -13,6 +13,10 @@ const OPPOSITE = { left: 'right', right: 'left', up: 'down', down: 'up' };
 const PACMAN_SPEED = 0.125; // 1/8 celda/frame -> alinea cada 8 frames
 const GHOST_SPEED = 0.1;    // 1/10 celda/frame
 
+// Puerta de la pen (fila 12, cols 13-14 del laberinto). Columna fija de salida.
+const PEN_DOOR_X = 13;
+const PEN_DOOR_Y = 12;
+
 // Crea una partida nueva. Copia MAZE (pristino) a game.grid para poder comer
 // dots sin destruir el original, y reiniciar.
 function createGame() {
@@ -28,6 +32,7 @@ function createGame() {
     score: 0,
     lives: 3,
     dotsRemaining: dots,
+    playTime: 0, // segundos de juego (se cuentan desde que state === 'playing')
     grid,
     pacman: {
       x: PACMAN_START.x,
@@ -42,6 +47,8 @@ function createGame() {
       dir: 'up',
       speed: GHOST_SPEED,
       kind: g.kind,
+      releaseDelay: g.releaseDelay,
+      mode: 'waiting', // 'waiting' | 'leaving' | 'active'
     } ) ),
   };
 }
@@ -110,9 +117,67 @@ function movePacman( game ) {
   wrapTunnel( p, width );
 }
 
+// Celda objetivo de la personalidad de cada fantasma activo.
+//   blinky -> celda actual de Pacman.
+//   pinky  -> 4 celdas delante de Pacman en su direccion.
+//   inky   -> duplica el vector desde Blinky hasta 2 celdas delante de Pacman.
+//   clyde  -> Pacman si esta a mas de 8 celdas Manhattan; si no, esquina inferior
+//             izquierda del laberinto.
+// Devuelve la celda objetivo; null solo si el kind es desconocido.
+function ghostTarget( game, g ) {
+  const p = game.pacman;
+  const px = Math.round( p.x );
+  const py = Math.round( p.y );
+
+  if ( g.kind === 'blinky' ) return { x: px, y: py };
+
+  if ( g.kind === 'pinky' ) {
+    const d = DIRS[ p.dir ];
+    return { x: px + d.x * 4, y: py + d.y * 4 };
+  }
+
+  if ( g.kind === 'inky' ) {
+    const d = DIRS[ p.dir ];
+    const ax = px + d.x * 2; // celda 2 posiciones delante de Pacman (ancla)
+    const ay = py + d.y * 2;
+    const blinky = game.ghosts.find( ( gh ) => gh.kind === 'blinky' );
+    if ( !blinky ) return { x: ax, y: ay };
+    // Vector Blinky->ancla duplicado y aplicado desde Blinky.
+    return {
+      x: blinky.x + 2 * ( ax - blinky.x ),
+      y: blinky.y + 2 * ( ay - blinky.y ),
+    };
+  }
+
+  if ( g.kind === 'clyde' ) {
+    const dist = Math.abs( px - g.x ) + Math.abs( py - g.y );
+    if ( dist > 8 ) return { x: px, y: py };
+    return { x: 0, y: game.grid.length - 1 }; // esquina inferior izquierda
+  }
+
+  return null;
+}
+
+// Elige en la interseccion la direccion valida (sin invertir, salvo callejon)
+// cuyo siguiente paso reduce mas la distancia Manhattan hacia el objetivo.
+function chaseDirection( g, choices, target ) {
+  let best = choices[ 0 ];
+  let bestDist = Infinity;
+  for ( const dir of choices ) {
+    const d = DIRS[ dir ];
+    const nx = g.x + d.x;
+    const ny = g.y + d.y;
+    const dist = Math.abs( nx - target.x ) + Math.abs( ny - target.y );
+    if ( dist < bestDist ) {
+      bestDist = dist;
+      best = dir;
+    }
+  }
+  return best;
+}
+
 function decideGhost( game, g ) {
   const grid = game.grid;
-  const p = game.pacman;
 
   const options = Object.keys( DIRS ).filter(
     ( dir ) => dir !== OPPOSITE[ g.dir ] && canMove( grid, g.x, g.y, dir, 'ghost' )
@@ -120,35 +185,33 @@ function decideGhost( game, g ) {
   // Sin salida (callejon): permitir el giro de 180.
   const choices = options.length ? options : [ '' + OPPOSITE[ g.dir ] ];
 
-  if ( g.kind === 'hunter' ) {
-    const px = Math.round( p.x );
-    const py = Math.round( p.y );
-    let best = choices[ 0 ];
-    let bestDist = Infinity;
-    for ( const dir of choices ) {
-      const d = DIRS[ dir ];
-      const nx = g.x + d.x;
-      const ny = g.y + d.y;
-      const dist = Math.abs( nx - px ) + Math.abs( ny - py );
-      if ( dist < bestDist ) {
-        bestDist = dist;
-        best = dir;
-      }
-    }
-    g.dir = best;
-  } else {
-    g.dir = choices[ Math.floor( Math.random() * choices.length ) ];
-  }
+  // Aplica la personalidad solo a fantasmas activos (moveGhost lo garantiza).
+  const target = ghostTarget( game, g );
+  if ( !target ) return; // kind sin personalidad: conserva la direccion actual
+  g.dir = chaseDirection( g, choices, target );
+}
+
+// Camino guiado del modo 'leaving': primero alinear en la columna de la puerta
+// (fila 14 esta completamente abierta dentro de la pen) y luego subir por ella.
+function guideLeaving( g ) {
+  if ( g.x !== PEN_DOOR_X ) g.dir = g.x < PEN_DOOR_X ? 'right' : 'left';
+  else g.dir = 'up';
 }
 
 function moveGhost( game, g ) {
+  // Un fantasma esperando su demora permanece inmóvil en la pen.
+  if ( g.mode === 'waiting' ) return;
+
   const grid = game.grid;
   const width = grid[ 0 ].length;
 
   if ( aligned( g.x ) && aligned( g.y ) ) {
     g.x = Math.round( g.x );
     g.y = Math.round( g.y );
-    decideGhost( game, g );
+    // La IA normal solo se aplica tras cruzar la puerta (celda por encima).
+    if ( g.mode === 'leaving' && g.y < PEN_DOOR_Y ) g.mode = 'active';
+    if ( g.mode === 'leaving' ) guideLeaving( g );
+    else if ( g.mode === 'active' ) decideGhost( game, g );
     if ( !canMove( grid, g.x, g.y, g.dir, 'ghost' ) ) return;
   }
 
@@ -164,10 +227,13 @@ function resetPositions( game ) {
   p.y = PACMAN_START.y;
   p.dir = 'left';
   p.nextDir = null;
+  // Cada vida arranca en las mismas condiciones: pen, modo waiting y reloj en 0.
+  game.playTime = 0;
   game.ghosts.forEach( ( g, i ) => {
     g.x = GHOST_STARTS[ i ].x;
     g.y = GHOST_STARTS[ i ].y;
     g.dir = 'up';
+    g.mode = 'waiting';
   } );
 }
 
@@ -175,7 +241,21 @@ function collides( a, b ) {
   return Math.abs( a.x - b.x ) < 0.5 && Math.abs( a.y - b.y ) < 0.5;
 }
 
+// Pasa a 'leaving' cada fantasma cuya demora ya se cumplio en el reloj de juego.
+function releaseGhosts( game ) {
+  for ( const g of game.ghosts ) {
+    if ( g.mode === 'waiting' && game.playTime >= g.releaseDelay ) {
+      g.mode = 'leaving';
+    }
+  }
+}
+
 function update( game ) {
+  // Reloj de juego en segundos (60 fps nominal, como el resto del bucle).
+  // Las demoras de salida de los fantasmas se miden contra este contador.
+  if ( game.state === 'playing' ) game.playTime += 1 / 60;
+  releaseGhosts( game );
+
   movePacman( game );
   game.ghosts.forEach( ( g ) => moveGhost( game, g ) );
 
